@@ -3,7 +3,9 @@ package sshmux
 import (
 	"errors"
 	"io"
+        "log"
 	"net"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -81,9 +83,20 @@ func (p *publicKey) Verify([]byte, *ssh.Signature) error {
 	return errors.New("verify not implemented")
 }
 
+func (s *Server) HandleNewChannel(session *Session, newChannel ssh.NewChannel) {
+	log.Printf("New Channel: %s", newChannel)
+	switch newChannel.ChannelType() {
+	case "direct-tcpip":
+		s.ChannelForward(session, newChannel)
+	default:
+		log.Printf("Unknown SSH channel type: %s", newChannel.ChannelType())
+		newChannel.Reject(ssh.UnknownChannelType, "connection flow not supported by sshmux")
+	}
+}
+
 // HandleConn takes a net.Conn and runs it through sshmux.
 func (s *Server) HandleConn(c net.Conn) {
-	sshConn, chans, reqs, err := ssh.NewServerConn(c, s.sshConfig)
+	sshConn, newChans, reqs, err := ssh.NewServerConn(c, s.sshConfig)
 	if err != nil {
 		c.Close()
 		return
@@ -109,22 +122,30 @@ func (s *Server) HandleConn(c net.Conn) {
 	}
 
 	s.Setup(session)
-
 	go ssh.DiscardRequests(reqs)
-	newChannel := <-chans
-	if newChannel == nil {
-		sshConn.Close()
-		return
-	}
 
-	switch newChannel.ChannelType() {
-	case "session":
-		s.SessionForward(session, newChannel, chans)
-	case "direct-tcpip":
-		s.ChannelForward(session, newChannel)
-	default:
-		newChannel.Reject(ssh.UnknownChannelType, "connection flow not supported by sshmux")
-	}
+	go func() {
+		defer sshConn.Close()
+		var wg sync.WaitGroup
+		for newChannel := range newChans {
+			wg.Add(1)
+			if (newChannel.ChannelType() == "session") {
+				go func() {
+					defer wg.Done()
+					s.SessionForward(session, newChannel, newChans)
+				}()
+				break
+			} else {
+				go func() {
+					defer wg.Done()
+					s.HandleNewChannel(session, newChannel)
+				}()
+			}
+		}
+
+		wg.Wait()
+		log.Printf("Closing connection for: %s", session.User.Name)
+	}()
 }
 
 // Serve is an Accept loop that sends the accepted connections through

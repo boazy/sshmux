@@ -3,6 +3,7 @@ package sshmux
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"sync"
 
@@ -81,6 +82,7 @@ func (s *Server) ChannelForward(session *Session, newChannel ssh.NewChannel) {
 	}
 
 	if !permitted {
+		log.Printf("Disallowed access to %s for user %s", address, session.User.Name)
 		newChannel.Reject(ssh.Prohibited, "remote host access denied for user")
 		return
 	}
